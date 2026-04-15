@@ -1,292 +1,155 @@
 # LLM Gateway
 
-基于 FastAPI / PostgreSQL / Redis 的 LLM Gateway，提供统一 `/v1/chat/completions` 接口、网关 API Key 鉴权、Redis 限流、多上游路由、基础熔断，以及面向充值制售卖场景的余额计费。
+自用 LLM API 中转网关。基于 FastAPI + React，提供统一的 OpenAI 兼容接口，支持多 Provider 路由、按 Token 计费、余额管理和 Stripe 支付。
 
 ## 项目结构
 
 ```text
 llm-gateway/
-├── app/
+├── app/                    # FastAPI 后端
 │   ├── main.py
 │   ├── config.py
-│   ├── db.py
-│   ├── redis_client.py
-│   ├── deps.py
-│   ├── core/
-│   ├── models/
-│   ├── routers/
-│   ├── schemas/
-│   ├── services/
+│   ├── deps.py             # 鉴权依赖
+│   ├── models/             # SQLAlchemy 模型
+│   ├── routers/            # API 路由
+│   ├── schemas/            # Pydantic 模型
+│   ├── services/           # 业务逻辑
 │   └── utils/
-├── alembic/
-│   ├── env.py
-│   └── versions/
-├── scripts/
-│   └── seed_data.py
+├── frontend/               # React + TypeScript 前端
+│   ├── src/
+│   │   ├── api/client.ts   # Axios 封装
+│   │   ├── context/        # AuthContext
+│   │   ├── components/     # Layout 等
+│   │   └── pages/          # Dashboard, ApiKeys, Usage, TopUp, Login, Register
+│   ├── package.json
+│   └── vite.config.ts
+├── alembic/                # 数据库迁移
+├── scripts/seed_data.py    # 初始化测试数据
 ├── tests/
-├── .env.example
-├── Dockerfile
 ├── docker-compose.yml
-├── requirements.txt
-└── README.md
+├── Dockerfile
+└── .env.example
 ```
 
-## 核心能力
+## 核心功能
 
-- `POST /v1/chat/completions`：OpenAI 风格请求代理。
-- `GET /v1/me/balance`：客户查询当前余额。
-- `GET /v1/me/dashboard`：客户自助仪表盘数据，包含余额、请求、token、账本、模型消耗。
-- `GET /health`：检查 API、PostgreSQL、Redis 健康状态。
-- `GET /portal`：内置 Web 门户，支持用户名 + 专属 key 登录、充值、查看用量和网页调试。
-- `GET /admin/providers`：列出当前 provider 及健康状态，仅 admin key 可访问。
-- `POST /admin/providers`：添加 OpenAI / Anthropic / Mock provider。
-- `POST /admin/pricing`：配置某个 provider 下某个模型的单价。
-- `POST /admin/customers`：创建客户并签发网关 key。
-- `POST /admin/topups`：给客户充值，支持“付款金额 / 毛利 / 实际授信额度”拆分。
-- `GET /admin/usage/users`：按客户查看请求数、tokens、估算成本、实扣金额、剩余余额。
-- `GET /admin/usage/models`：按 provider + model 查看汇总用量。
-- `GET /admin/ledger/{user_id}`：查看某个客户的充值 / 扣费账本。
-- 网关 API Key 只保存 HMAC-SHA256 hash，不存明文。
-- 区分 `admin key` 与普通客户 key。
-- 用户余额按 `Decimal` 记账，充值金额保留 2 位小数。
-- 真实 usage 成本保留 6 位小数，避免模型计费精度损失。
-- 可配置余额耗尽后自动禁用客户 key，充值后自动恢复。
-- Redis 限流：
-  - API Key 每分钟 60 次
-  - IP 每分钟 120 次
-- Provider 路由：
-  - 根据 `model + priority + health` 选路
-  - 失败时自动回退到下一个可用 provider
-- Provider adapter：
-  - `openai`：官方 / 兼容 OpenAI Chat Completions
-  - `anthropic`：官方 Claude Messages API，自动映射到统一输出格式
-  - `mock`：本地联调用
-- 熔断：
-  - 连续失败 3 次进入 60 秒冷却
-  - 冷却期间不参与路由
+### API 代理
+- `POST /v1/chat/completions` — OpenAI 兼容接口，支持流式和非流式
+- 基于 LangGraph 状态机的 Provider 路由，自动 Fallback
+- 支持 OpenAI、Anthropic、Gemini 三种 Provider 类型
+- 连续失败 3 次自动熔断，60 秒冷却
 
-## 环境变量
+### 用户系统
+- JWT + API Key 双重鉴权
+- 邮箱密码注册/登录
+- 自助管理 API Key（创建/吊销）
 
-主要配置见 `.env.example`：
+### 计费系统
+- 充值制，Decimal 全链路精度
+- 按实际 Token 用量扣费（input/output 独立定价）
+- 余额归零自动禁用 Key，充值后自动恢复
+- Stripe 支付集成（Webhook 幂等处理）
 
-- `DATABASE_URL`：应用异步连接串
-- `DATABASE_SYNC_URL`：Alembic 迁移连接串
-- `REDIS_URL`：Redis 连接串
-- `GATEWAY_API_KEY_HASH_SECRET`：网关 API Key 哈希密钥
-- `ENABLE_MOCK_PROVIDER`：是否启用内置 mock provider
-- `SEED_ADMIN_API_KEY`：初始化写入的 admin key
-- `SEED_GATEWAY_API_KEY`：初始化脚本写入的测试网关密钥
-- `SEED_DEMO_PAYMENT_AMOUNT`：演示客户付款金额
-- `SEED_DEMO_MARGIN_AMOUNT`：演示客户毛利金额
-- `AUTO_DISABLE_API_KEYS_ON_ZERO_BALANCE`：余额耗尽后是否自动禁用客户 key
-- `SEED_PROVIDER_*`：可选真实上游 provider 初始化参数
+### 管理后台
+- Provider 管理（增/查）
+- 模型定价配置（支持通配符 `*`）
+- 客户管理、充值、账本查询
+- 按用户/模型维度用量报表
 
-## 本地启动
+### 限流
+- API Key 维度：60 次/分钟
+- IP 维度：120 次/分钟
 
-1. 创建虚拟环境并安装依赖：
+## 快速开始
+
+### 环境要求
+
+- Python 3.11+
+- Node.js 18+
+- PostgreSQL 16+
+- Redis 7+
+
+### 后端启动
 
 ```bash
+# 1. 安装依赖
 python3.11 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
-```
 
-2. 复制环境变量：
-
-```bash
+# 2. 配置环境变量
 cp .env.example .env
-```
+# 编辑 .env，填入你的配置
 
-3. 启动 PostgreSQL 和 Redis。
+# 3. 启动数据库和 Redis（或用 docker compose）
+docker compose up postgres redis -d
 
-4. 执行迁移：
-
-```bash
+# 4. 迁移数据库
 alembic upgrade head
-```
 
-5. 初始化测试数据：
-
-```bash
+# 5. 初始化测试数据
 python -m scripts.seed_data
-```
 
-6. 启动服务：
-
-```bash
+# 6. 启动服务
 uvicorn app.main:app --reload
 ```
 
-7. 打开门户：
+### 前端启动
 
-```text
-http://localhost:8000/portal
+```bash
+cd frontend
+npm install
+npm run dev
+# 访问 http://localhost:5173
 ```
 
-## Docker 启动
-
-直接启动：
+### Docker 一键启动（仅后端）
 
 ```bash
 docker compose up --build
 ```
 
-`app` 容器会自动执行：
+### 前端环境变量
 
 ```bash
-alembic upgrade head
-python -m scripts.seed_data
-uvicorn app.main:app --host 0.0.0.0 --port 8000
+cd frontend
+cp .env.example .env
+# 编辑 VITE_API_BASE_URL 指向你的后端地址
 ```
 
-## 初始化测试数据
+## 环境变量说明
 
-默认初始化内容：
+所有配置见 `.env.example`，关键项：
 
-- 管理员：`admin-user`
-- 演示客户：`demo-user`
-- Admin API Key：读取 `SEED_ADMIN_API_KEY`
-- Customer API Key：读取 `SEED_GATEWAY_API_KEY`
-- 演示客户余额：`SEED_DEMO_PAYMENT_AMOUNT - SEED_DEMO_MARGIN_AMOUNT`
-- Mock provider：`local-mock-provider`
-
-默认测试 key：
-
-```text
-gw_admin_local_key
-gw_demo_local_key
-```
-
-如果你配置了下面这些环境变量，脚本还会额外插入一个真实 provider：
-
-- `SEED_PROVIDER_BASE_URL`
-- `SEED_PROVIDER_API_KEY`
-- `SEED_PROVIDER_SUPPORTED_MODELS`
+| 变量 | 说明 |
+|---|---|
+| `DATABASE_URL` | PostgreSQL 异步连接串 |
+| `REDIS_URL` | Redis 连接串 |
+| `GATEWAY_API_KEY_HASH_SECRET` | API Key 哈希密钥（生产必改） |
+| `JWT_SECRET` | JWT 签名密钥（生产必改） |
+| `CORS_ORIGINS` | 允许的前端域名，逗号分隔 |
+| `STRIPE_SECRET_KEY` | Stripe 密钥（可选） |
+| `STRIPE_WEBHOOK_SECRET` | Stripe Webhook 签名密钥（可选） |
+| `SEED_PROVIDER_*` | 初始化真实 Provider 的配置（可选） |
 
 ## 调用示例
 
-### 1. 健康检查
-
 ```bash
+# 健康检查
 curl http://localhost:8000/health
-```
 
-### 2. Mock provider 直连
-
-```bash
-curl -X POST http://localhost:8000/mock/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model": "gpt-4o-mini",
-    "messages": [{"role": "user", "content": "hello mock"}]
-  }'
-```
-
-### 3. 通过网关请求 chat completions
-
-```bash
+# Chat Completions（用你的 API Key 替换）
 curl -X POST http://localhost:8000/v1/chat/completions \
-  -H "Authorization: Bearer gw_demo_local_key" \
+  -H "Authorization: Bearer YOUR_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
     "model": "gpt-4o-mini",
-    "messages": [
-      {"role": "system", "content": "You are a helpful assistant."},
-      {"role": "user", "content": "Say hello from the gateway"}
-    ],
-    "temperature": 0.2,
-    "max_tokens": 128
+    "messages": [{"role": "user", "content": "Hello"}]
   }'
-```
 
-### 4. 查看当前余额
-
-```bash
+# 查询余额
 curl http://localhost:8000/v1/me/balance \
-  -H "Authorization: Bearer gw_demo_local_key"
-```
-
-### 5. 查看 provider 列表
-
-```bash
-curl http://localhost:8000/admin/providers \
-  -H "Authorization: Bearer gw_admin_local_key"
-```
-
-### 5.1 打开 Web 门户
-
-浏览器访问：
-
-```text
-http://localhost:8000/portal
-```
-
-可直接粘贴：
-
-- 演示用户：用户名 `demo-user`，key `gw_demo_local_key`
-- 管理员：用户名 `admin-user`，key `gw_admin_local_key`
-
-门户当前支持：
-
-- 用“用户名 + API key”登录，而不是只粘贴 key
-- 查看当前余额、累计请求、累计 token、累计扣费
-- 查看最近请求和最近账本
-- 在网页里直接发起一条测试 `/v1/chat/completions`
-- 使用 admin key 创建新客户并签发唯一 gateway key
-- 使用 admin key 给现有客户充值
-
-### 6. 新增真实 OpenAI provider
-
-```bash
-curl -X POST http://localhost:8000/admin/providers \
-  -H "Authorization: Bearer gw_admin_local_key" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "name": "openai-main",
-    "provider_type": "openai",
-    "base_url": "https://api.openai.com",
-    "api_key": "sk-xxx",
-    "supported_models": ["gpt-4o-mini"],
-    "priority": 90,
-    "weight": 100,
-    "timeout_seconds": 30
-  }'
-```
-
-### 7. 为 provider 配置价格
-
-```bash
-curl -X POST http://localhost:8000/admin/pricing \
-  -H "Authorization: Bearer gw_admin_local_key" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "provider_id": "replace-with-provider-id",
-    "model_name": "gpt-4o-mini",
-    "input_cost_per_1k_tokens": "0.12",
-    "output_cost_per_1k_tokens": "0.24",
-    "currency": "CNY"
-  }'
-```
-
-### 8. 查看客户用量汇总
-
-```bash
-curl http://localhost:8000/admin/usage/users \
-  -H "Authorization: Bearer gw_admin_local_key"
-```
-
-### 9. 查看模型用量汇总
-
-```bash
-curl http://localhost:8000/admin/usage/models \
-  -H "Authorization: Bearer gw_admin_local_key"
-```
-
-### 10. 查看客户账本
-
-```bash
-curl http://localhost:8000/admin/ledger/<user_id> \
-  -H "Authorization: Bearer gw_admin_local_key"
+  -H "Authorization: Bearer YOUR_API_KEY"
 ```
 
 ## 测试
@@ -295,27 +158,8 @@ curl http://localhost:8000/admin/ledger/<user_id> \
 pytest
 ```
 
-当前最小测试覆盖：
+## 技术栈
 
-- `/health`
-- `/v1/chat/completions` 未鉴权返回 401
-- `/v1/me/balance` 与余额扣减
-- 限流触发时返回 429
-- 非 admin key 访问 `/admin/providers` 返回 403
-- admin 用量汇总与账本接口
-- 余额清零自动禁用 key，充值后自动恢复
+**后端**: FastAPI, SQLAlchemy 2.0, LangChain, LangGraph, PostgreSQL, Redis, Stripe
 
-## 已知限制
-
-- 当前只实现非流式请求，`stream=true` 会返回 `400`
-- 价格表需要你手工录入或通过后台接口维护，目前不做自动汇率与官方价格同步
-- 管理端目前只做了轻量写接口，还没有删除、编辑历史和多角色后台
-- 限流为固定窗口实现，优先保证简单稳定
-
-## 后续扩展建议
-
-- SSE / chunked streaming
-- 更精细的 provider 权重调度
-- Prometheus 指标与告警
-- 后台管理界面
-- 更精确的模型成本配置与聚合报表
+**前端**: React 18, TypeScript, Vite, Tailwind CSS, Axios
