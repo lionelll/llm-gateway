@@ -1,0 +1,272 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>LLM Gateway Portal</title>
+    <link rel="stylesheet" href="/assets/portal.css" />
+  </head>
+  <body>
+    <main class="page">
+      <header class="page-header">
+        <div>
+          <h1>LLM Gateway</h1>
+          <p>用户登录、余额、充值、发 key 和调用记录都放在一个简单页面里。</p>
+        </div>
+      </header>
+
+      <section class="card login-card">
+        <div class="section-title">
+          <h2>用户登录</h2>
+          <p>用用户名和专属 gateway key 登录。每个付费用户拿到的 key 都不一样。</p>
+        </div>
+        <form id="login-form" class="stack-form">
+          <label class="field">
+            <span>用户名</span>
+            <input id="login-user-name" type="text" placeholder="demo-user" autocomplete="username" required />
+          </label>
+          <label class="field">
+            <span>API Key</span>
+            <input id="login-api-key" type="password" placeholder="gw_xxx" autocomplete="off" required />
+          </label>
+          <div class="button-row">
+            <button type="submit" class="primary-button">登录</button>
+            <button type="button" id="fill-demo-user" class="secondary-button">演示用户</button>
+            <button type="button" id="fill-demo-admin" class="secondary-button">管理员</button>
+          </div>
+          <p id="login-status" class="helper-text">首次登录后会保存在当前浏览器会话里。</p>
+        </form>
+      </section>
+
+      <section id="app-shell" hidden>
+        <section class="card session-card">
+          <div>
+            <h2 id="session-user-name">-</h2>
+            <p id="session-meta" class="helper-text">-</p>
+          </div>
+          <div class="button-row">
+            <button type="button" id="refresh-button" class="secondary-button">刷新</button>
+            <button type="button" id="logout-button" class="secondary-button">退出</button>
+          </div>
+        </section>
+
+        <section class="summary-grid">
+          <article class="card summary-card">
+            <span>余额</span>
+            <strong id="metric-balance">0.00</strong>
+          </article>
+          <article class="card summary-card">
+            <span>请求数</span>
+            <strong id="metric-requests">0</strong>
+          </article>
+          <article class="card summary-card">
+            <span>Tokens</span>
+            <strong id="metric-tokens">0</strong>
+          </article>
+          <article class="card summary-card">
+            <span>累计扣费</span>
+            <strong id="metric-cost">0.00</strong>
+          </article>
+        </section>
+
+        <section class="main-grid">
+          <section class="card">
+            <div class="section-title">
+              <h2>发一条测试消息</h2>
+              <p>用当前用户自己的 key 直接调网关。</p>
+            </div>
+            <form id="playground-form" class="stack-form">
+              <label class="field">
+                <span>模型</span>
+                <input id="playground-model" type="text" value="gpt-4o-mini" />
+              </label>
+              <label class="field">
+                <span>消息</span>
+                <textarea id="playground-prompt" rows="5" placeholder="比如：请回复一段欢迎语"></textarea>
+              </label>
+              <div class="inline-grid">
+                <label class="field">
+                  <span>Temperature</span>
+                  <input id="playground-temperature" type="number" min="0" max="2" step="0.1" value="0.2" />
+                </label>
+                <label class="field">
+                  <span>Max Tokens</span>
+                  <input id="playground-max-tokens" type="number" min="1" max="4096" step="1" value="128" />
+                </label>
+              </div>
+              <div class="button-row">
+                <button type="submit" class="primary-button">发送</button>
+                <p id="playground-status" class="helper-text">发送后会自动刷新余额和统计。</p>
+              </div>
+            </form>
+            <pre id="playground-response" class="response-box">这里显示模型回复和 usage。</pre>
+          </section>
+
+          <section class="card">
+            <div class="section-title">
+              <h2>账户信息</h2>
+              <p>当前登录用户的关键信息。</p>
+            </div>
+            <dl class="account-list">
+              <div>
+                <dt>用户名</dt>
+                <dd id="account-user-name">-</dd>
+              </div>
+              <div>
+                <dt>Key 前缀</dt>
+                <dd id="account-key-prefix">-</dd>
+              </div>
+              <div>
+                <dt>角色</dt>
+                <dd id="account-role">-</dd>
+              </div>
+              <div>
+                <dt>余额</dt>
+                <dd id="account-balance">-</dd>
+              </div>
+            </dl>
+          </section>
+        </section>
+
+        <section class="data-grid">
+          <section class="card">
+            <div class="section-title">
+              <h2>最近请求</h2>
+              <p>看每次调用的状态、token 和扣费。</p>
+            </div>
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>时间</th>
+                    <th>模型</th>
+                    <th>状态</th>
+                    <th>Tokens</th>
+                    <th>扣费</th>
+                  </tr>
+                </thead>
+                <tbody id="requests-table-body"></tbody>
+              </table>
+            </div>
+          </section>
+
+          <section class="card">
+            <div class="section-title">
+              <h2>最近账本</h2>
+              <p>充值和消耗都在这里。</p>
+            </div>
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>时间</th>
+                    <th>类型</th>
+                    <th>金额</th>
+                    <th>余额后</th>
+                  </tr>
+                </thead>
+                <tbody id="ledger-table-body"></tbody>
+              </table>
+            </div>
+          </section>
+        </section>
+
+        <section id="admin-shell" hidden>
+          <section class="admin-grid">
+            <section class="card">
+              <div class="section-title">
+                <h2>收款后创建用户</h2>
+                <p>为新用户生成专属 key。不同用户会得到不同 key。</p>
+              </div>
+              <form id="customer-form" class="stack-form">
+                <label class="field">
+                  <span>用户名</span>
+                  <input id="customer-name" type="text" placeholder="new-user" required />
+                </label>
+                <label class="field">
+                  <span>备注</span>
+                  <input id="customer-description" type="text" placeholder="可选" />
+                </label>
+                <div class="inline-grid">
+                  <label class="field">
+                    <span>付款金额</span>
+                    <input id="customer-payment" type="number" min="0.01" step="0.01" value="200.00" required />
+                  </label>
+                  <label class="field">
+                    <span>毛利金额</span>
+                    <input id="customer-margin" type="number" min="0.00" step="0.01" value="40.00" required />
+                  </label>
+                </div>
+                <div class="button-row">
+                  <button type="submit" class="primary-button">创建用户并发 key</button>
+                  <p id="customer-status" class="helper-text">创建成功后会显示新 key。</p>
+                </div>
+              </form>
+              <div id="customer-result" class="result-box" hidden>
+                <span>新用户 API Key</span>
+                <code id="customer-api-key"></code>
+                <button type="button" id="copy-api-key-button" class="secondary-button">复制</button>
+              </div>
+            </section>
+
+            <section class="card">
+              <div class="section-title">
+                <h2>给现有用户充值</h2>
+                <p>充值只加余额，不会和其他用户共用 key。</p>
+              </div>
+              <form id="topup-form" class="stack-form">
+                <label class="field">
+                  <span>选择用户</span>
+                  <select id="topup-user-id" required></select>
+                </label>
+                <div class="inline-grid">
+                  <label class="field">
+                    <span>付款金额</span>
+                    <input id="topup-payment" type="number" min="0.01" step="0.01" value="200.00" required />
+                  </label>
+                  <label class="field">
+                    <span>毛利金额</span>
+                    <input id="topup-margin" type="number" min="0.00" step="0.01" value="40.00" required />
+                  </label>
+                </div>
+                <label class="field">
+                  <span>授信额度</span>
+                  <input id="topup-granted-preview" type="text" value="160.00" readonly />
+                </label>
+                <div class="button-row">
+                  <button type="submit" class="primary-button">确认充值</button>
+                  <p id="topup-status" class="helper-text">付款金额减毛利金额等于授信额度。</p>
+                </div>
+              </form>
+            </section>
+          </section>
+
+          <section class="card">
+            <div class="section-title">
+              <h2>用户列表</h2>
+              <p>看每个用户的余额、请求量和当前可用 key 数量。</p>
+            </div>
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>用户名</th>
+                    <th>余额</th>
+                    <th>请求数</th>
+                    <th>Tokens</th>
+                    <th>扣费</th>
+                    <th>Key 数量</th>
+                  </tr>
+                </thead>
+                <tbody id="users-table-body"></tbody>
+              </table>
+            </div>
+          </section>
+        </section>
+      </section>
+    </main>
+
+    <div id="toast" class="toast" hidden></div>
+    <script src="/assets/portal.js" defer></script>
+  </body>
+</html>
