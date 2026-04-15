@@ -149,11 +149,11 @@ async def seed_user_and_api_key() -> None:
 
         await session.commit()
 
-    print(f"Admin API key: {settings.seed_admin_api_key}")
-    print(f"Customer API key: {settings.seed_gateway_api_key}")
+    print("Seed data initialized successfully.")
     print(f"Customer credited balance: {settings.seed_demo_credited_amount}")
     if settings.enable_mock_provider:
         print(f"Mock provider enabled for model(s): {settings.default_mock_model}, gpt-3.5-turbo")
+    # Note: API keys are NOT printed to avoid leaking secrets in logs.
 
 
 async def upsert_pricing(

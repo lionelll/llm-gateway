@@ -100,13 +100,17 @@ async def stripe_webhook(
 
     body = await request.body()
     try:
-        event = stripe.WebhookSignature.verify_header(
+        stripe.WebhookSignature.verify_header(
             body.decode(),
             stripe_signature or "",
             settings.stripe_webhook_secret,
         )
     except stripe.SignatureVerificationError:
         raise HTTPException(status_code=400, detail="Invalid Stripe signature.")
+
+    # Parse the event from the verified request body
+    import json as _json
+    event = _json.loads(body)
 
     if event["type"] == "checkout.session.completed":
         await _handle_checkout_completed(session, event["data"]["object"])

@@ -23,11 +23,12 @@ export default function Dashboard() {
           api.get("/v1/me/dashboard"),
         ])
         const d = dashRes.data
+        const summary = d.usage_summary || {}
         setStats({
           balance: d.balance,
-          total_requests: d.total_requests,
-          total_tokens: d.total_tokens,
-          total_charged: d.total_charged,
+          total_requests: summary.request_count ?? 0,
+          total_tokens: summary.total_tokens ?? 0,
+          total_charged: summary.billed_amount ?? "0.00",
         })
         setRecentRequests(d.recent_requests || [])
       } catch {

@@ -7,6 +7,7 @@ from app.config import get_settings
 from app.db import get_async_session
 from app.deps import AuthContext, require_admin_api_key
 from app.models.api_key import APIKey
+from app.models.balance_transaction import BalanceTransaction
 from app.models.model_pricing import ModelPricing
 from app.models.provider import Provider
 from app.models.provider_health import ProviderHealth
@@ -111,6 +112,12 @@ async def upsert_pricing(
     _: AuthContext = Depends(require_admin_api_key),
     session: AsyncSession = Depends(get_async_session),
 ) -> dict:
+    if payload.currency != "CNY":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Only CNY pricing is supported. Got '{payload.currency}'.",
+        )
+
     provider = (await session.execute(select(Provider).where(Provider.id == payload.provider_id))).scalar_one_or_none()
     if provider is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Provider not found.")
@@ -202,6 +209,16 @@ async def top_up_customer(
     if user is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found.")
 
+    # Idempotency check
+    idempotency_note = f"topup:{payload.idempotency_key}"
+    existing = (
+        await session.execute(
+            select(BalanceTransaction).where(BalanceTransaction.note == idempotency_note).limit(1)
+        )
+    ).scalar_one_or_none()
+    if existing is not None:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Duplicate topup request (idempotency_key already used).")
+
     payment_amount, granted_balance, margin_amount = resolve_topup_amounts(
         payment_amount=payload.payment_amount,
         granted_balance=payload.granted_balance,
@@ -213,7 +230,7 @@ async def top_up_customer(
             payment_amount=payment_amount,
             granted_balance=granted_balance,
             margin_amount=margin_amount,
-            note=payload.note or "Manual topup",
+            note=idempotency_note,
         )
     )
     await reactivate_user_api_keys(session, user_id=user.id)

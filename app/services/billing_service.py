@@ -22,7 +22,18 @@ def resolve_topup_amounts(
     granted = quantize_money(granted_balance or ZERO_MONEY)
     margin = quantize_money(margin_amount or ZERO_MONEY)
 
-    if granted == ZERO_MONEY and payment > ZERO_MONEY:
+    # Count how many values were explicitly provided (non-zero)
+    provided = sum(1 for v in (payment, granted, margin) if v > ZERO_MONEY)
+
+    if provided == 3:
+        # All three provided — verify consistency instead of silently overwriting
+        expected_margin = quantize_money(payment - granted)
+        if expected_margin != margin:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Inconsistent amounts: payment({payment}) - granted({granted}) = {expected_margin}, but margin={margin}.",
+            )
+    elif granted == ZERO_MONEY and payment > ZERO_MONEY:
         granted = quantize_money(payment - margin)
     elif payment == ZERO_MONEY and granted > ZERO_MONEY:
         payment = quantize_money(granted + margin)
@@ -41,8 +52,7 @@ def resolve_topup_amounts(
             detail="Payment amount cannot be smaller than granted balance.",
         )
 
-    margin = quantize_money(payment - granted)
-    return payment, granted, margin
+    return payment, granted, quantize_money(payment - granted)
 
 
 def ensure_sufficient_balance(user: User, required_amount: Decimal, *, model: str) -> None:
@@ -133,14 +143,25 @@ async def apply_usage_charge(
     billed_amount: Decimal,
 ) -> BalanceTransaction | None:
     settings = get_settings()
-    charged_amount = min(user.balance, billed_amount)
+
+    # Row-level lock to prevent concurrent balance races
+    locked_user = (
+        await session.execute(
+            select(User).where(User.id == user.id).with_for_update()
+        )
+    ).scalar_one()
+
+    charged_amount = min(locked_user.balance, billed_amount)
     charged_amount = charged_amount.quantize(MONEY_QUANTUM)
     usage_log.billed_amount = charged_amount
 
     if charged_amount <= ZERO_MONEY:
         return None
 
-    user.balance = quantize_money(user.balance - charged_amount)
+    locked_user.balance = quantize_money(locked_user.balance - charged_amount)
+    # Sync the in-memory user object so callers see the updated balance
+    user.balance = locked_user.balance
+
     transaction = build_usage_transaction(
         user=user,
         api_key=api_key,
@@ -148,7 +169,7 @@ async def apply_usage_charge(
         charged_amount=charged_amount,
     )
     session.add(transaction)
-    if settings.auto_disable_api_keys_on_zero_balance and user.balance <= ZERO_MONEY:
+    if settings.auto_disable_api_keys_on_zero_balance and locked_user.balance <= ZERO_MONEY:
         api_keys = list((await session.scalars(select(APIKey).where(APIKey.user_id == user.id))).all())
         for item in api_keys:
             item.is_active = False

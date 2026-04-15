@@ -85,6 +85,7 @@ async def test_zero_balance_disables_key_and_topup_reactivates(async_client, adm
         headers=admin_headers,
         json={
             "user_id": user_id,
+            "idempotency_key": "test-reactivate-001",
             "payment_amount": "10.00",
             "granted_balance": "8.00",
             "margin_amount": "2.00",

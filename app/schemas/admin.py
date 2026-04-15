@@ -51,6 +51,7 @@ class TopUpRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     user_id: str
+    idempotency_key: str = Field(description="Unique key to prevent duplicate topups")
     payment_amount: Decimal | None = Field(default=None, ge=Decimal("0.00"))
     granted_balance: Decimal | None = Field(default=None, ge=Decimal("0.00"))
     margin_amount: Decimal | None = Field(default=None, ge=Decimal("0.00"))

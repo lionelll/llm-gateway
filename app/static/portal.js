@@ -3,7 +3,7 @@ const SESSION_API_KEY = "gateway-portal-api-key";
 
 const state = {
   userName: window.sessionStorage.getItem(SESSION_USER_KEY) || "",
-  apiKey: window.sessionStorage.getItem(SESSION_API_KEY) || "",
+  apiKey: "",  // Never loaded from storage — memory only
   isAdmin: false,
   refreshTimer: null,
   lastCustomerApiKey: "",
@@ -98,16 +98,15 @@ function formatDateTime(value) {
 function setSession(userName, apiKey) {
   state.userName = userName.trim();
   state.apiKey = apiKey.trim();
+  // API key is kept in memory only — never persisted to storage
   if (state.userName) {
     window.sessionStorage.setItem(SESSION_USER_KEY, state.userName);
   } else {
     window.sessionStorage.removeItem(SESSION_USER_KEY);
   }
-  if (state.apiKey) {
-    window.sessionStorage.setItem(SESSION_API_KEY, state.apiKey);
-  } else {
-    window.sessionStorage.removeItem(SESSION_API_KEY);
-  }
+  // Intentionally NOT storing apiKey in sessionStorage to prevent
+  // XSS / browser extension theft. Users must re-enter key on refresh.
+  window.sessionStorage.removeItem(SESSION_API_KEY);
 }
 
 function showToast(message, kind = "info") {
