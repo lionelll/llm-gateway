@@ -19,6 +19,7 @@ class Settings(BaseSettings):
     api_key_rate_limit_per_minute: int = 60
     ip_rate_limit_per_minute: int = 120
     auto_disable_api_keys_on_zero_balance: bool = True
+    default_max_tokens: int = 4096
 
     provider_failure_threshold: int = 3
     provider_cooldown_seconds: int = 60

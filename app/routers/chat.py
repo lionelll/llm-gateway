@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from sqlalchemy import select
 
+from app.config import get_settings
 from app.core.exceptions import GatewayError, UpstreamProviderError
 from app.db import get_async_session
 from app.models.provider import Provider
@@ -20,7 +21,7 @@ from app.schemas.chat import ChatCompletionRequest
 from app.services.auth_service import mark_api_key_used
 from app.services.billing_service import apply_usage_charge, settle_balance
 from app.services.logging_service import create_request_log, create_usage_log
-from app.services.pricing_service import compute_usage_cost, quantize_money
+from app.services.pricing_service import compute_usage_cost, estimate_prompt_tokens, quantize_money
 from app.services.provider_health_service import mark_provider_failure, mark_provider_success
 from app.services.proxy_service import proxy_chat_completion, proxy_chat_completion_stream
 from app.services.rate_limit_service import enforce_rate_limits
@@ -39,6 +40,11 @@ async def chat_completions(
 ):
     client_ip = request.client.host if request.client else "unknown"
     await enforce_rate_limits(redis, auth.api_key.id, client_ip)
+
+    # Enforce max_tokens — if user didn't send it, inject a hard default.
+    # This ensures the freeze amount is a true ceiling, not a guess.
+    if payload.max_tokens is None:
+        payload.max_tokens = get_settings().default_max_tokens
 
     if payload.stream:
         return await _handle_stream(payload, request, auth, session, client_ip)
@@ -211,6 +217,7 @@ async def _handle_stream(
 
     async def _generate():
         accumulated_usage: dict = {"prompt_tokens": 0, "completion_tokens": 0}
+        total_content_chars = 0
         stream_ok = True
         try:
             async for line in sse_gen:
@@ -222,6 +229,16 @@ async def _handle_stream(
                     except Exception:
                         pass
                     continue
+                # Track content chars for fallback billing on mid-stream failure
+                if line.startswith("data: {"):
+                    try:
+                        chunk_data = json.loads(line.removeprefix("data: ").strip())
+                        delta = chunk_data.get("choices", [{}])[0].get("delta", {})
+                        content = delta.get("content", "")
+                        if content:
+                            total_content_chars += len(content)
+                    except (json.JSONDecodeError, IndexError, KeyError):
+                        pass
                 yield line
 
         except Exception:
@@ -246,6 +263,27 @@ async def _handle_stream(
                 if pricing is not None:
                     estimated_cost = compute_usage_cost(accumulated_usage, pricing)
                     billed_amount = quantize_money(estimated_cost)
+
+                # Fallback: if usage reports zero tokens but content was delivered,
+                # estimate from character count to prevent zero-billing on stream failure
+                if (
+                    accumulated_usage.get("completion_tokens", 0) == 0
+                    and total_content_chars > 0
+                    and pricing is not None
+                ):
+                    fallback_completion = max(1, total_content_chars // 3)
+                    fallback_prompt = estimate_prompt_tokens(payload)
+                    accumulated_usage = {
+                        "prompt_tokens": fallback_prompt,
+                        "completion_tokens": fallback_completion,
+                    }
+                    estimated_cost = compute_usage_cost(accumulated_usage, pricing)
+                    billed_amount = quantize_money(estimated_cost)
+                    logger.warning(
+                        "Stream usage was zero but %d content chars delivered. "
+                        "Fallback billing: %d completion tokens. request_id=%s",
+                        total_content_chars, fallback_completion, request_id,
+                    )
 
                 usage_log = create_usage_log(
                     request_id=request_id,

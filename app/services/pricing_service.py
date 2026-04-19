@@ -46,19 +46,20 @@ def estimate_prompt_tokens(payload: ChatCompletionRequest) -> int:
     return max(1, (len(serialized) // 3) + 32)
 
 
-# Safety multiplier for pre-freeze estimates to reduce platform loss risk
-_FREEZE_SAFETY_MULTIPLIER = Decimal("1.5")
-
-
 def estimate_max_billable_amount(payload: ChatCompletionRequest, pricing: ModelPricing) -> Decimal:
+    """Compute the maximum possible cost for this request.
+
+    max_tokens is enforced at the router entry point, so it is always set.
+    The result is a hard ceiling (not an estimate) used for balance pre-freeze.
+    """
     estimated_input_tokens = estimate_prompt_tokens(payload)
-    estimated_output_tokens = payload.max_tokens or 512
+    estimated_output_tokens = payload.max_tokens
+    assert estimated_output_tokens is not None, "max_tokens must be enforced before estimate"
     raw_cost = (
         (Decimal(estimated_input_tokens) * pricing.input_cost_per_1k_tokens)
         + (Decimal(estimated_output_tokens) * pricing.output_cost_per_1k_tokens)
     ) / Decimal("1000")
-    # Apply safety multiplier to reduce chance of actual usage exceeding freeze
-    return quantize_money(quantize_raw_cost(raw_cost) * _FREEZE_SAFETY_MULTIPLIER)
+    return quantize_money(quantize_raw_cost(raw_cost))
 
 
 def compute_usage_cost(usage: dict[str, int] | None, pricing: ModelPricing) -> Decimal:

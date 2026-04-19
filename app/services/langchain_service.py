@@ -104,8 +104,7 @@ async def langchain_invoke(provider: Provider, payload: ChatCompletionRequest) -
         model = _build_model(provider, payload.model)
         if payload.temperature is not None:
             model = model.bind(temperature=payload.temperature)
-        if payload.max_tokens is not None:
-            model = model.bind(max_tokens=payload.max_tokens)
+        model = model.bind(max_tokens=payload.max_tokens)
 
         messages = _to_langchain_messages(payload.messages)
         ai_message: AIMessage = await model.ainvoke(messages)  # type: ignore[assignment]
@@ -134,8 +133,7 @@ async def langchain_stream(
         model = _build_model(provider, payload.model)
         if payload.temperature is not None:
             model = model.bind(temperature=payload.temperature)
-        if payload.max_tokens is not None:
-            model = model.bind(max_tokens=payload.max_tokens)
+        model = model.bind(max_tokens=payload.max_tokens)
 
         messages = _to_langchain_messages(payload.messages)
         chunk_id = f"chatcmpl-{uuid4().hex[:24]}"
