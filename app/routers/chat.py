@@ -15,7 +15,7 @@ from app.deps import AuthContext, require_api_key
 from app.redis_client import get_redis_client
 from app.schemas.chat import ChatCompletionRequest
 from app.services.auth_service import mark_api_key_used
-from app.services.billing_service import apply_usage_charge
+from app.services.billing_service import apply_usage_charge, settle_balance
 from app.services.logging_service import create_request_log, create_usage_log
 from app.services.pricing_service import compute_usage_cost, quantize_money
 from app.services.provider_health_service import mark_provider_failure, mark_provider_success
@@ -56,6 +56,10 @@ async def _handle_non_stream(
     request_id = str(uuid4())
     started_at = time.perf_counter()
 
+    # Cache scalar IDs before any session rollback (ORM objects expire after rollback)
+    user_id = auth.user.id
+    api_key_id = auth.api_key.id
+
     provider_id: str | None = None
     status_code = 500
     error_message: str | None = None
@@ -70,8 +74,8 @@ async def _handle_non_stream(
         session.add(
             create_request_log(
                 request_id=request_id,
-                user_id=auth.user.id,
-                api_key_id=auth.api_key.id,
+                user_id=user_id,
+                api_key_id=api_key_id,
                 provider_id=provider_id,
                 model=payload.model,
                 path=str(request.url.path),
@@ -110,6 +114,7 @@ async def _handle_non_stream(
             api_key=auth.api_key,
             usage_log=usage_log,
             billed_amount=billed_amount,
+            frozen_amount=proxy_result.frozen_amount,
         )
         remaining_balance = auth.user.balance
         await session.commit()
@@ -136,11 +141,13 @@ async def _handle_non_stream(
         provider_id = None
     finally:
         if status_code >= 400:
+            # Rollback any dirty state from a partially-failed billing attempt
+            await session.rollback()
             session.add(
                 create_request_log(
                     request_id=request_id,
-                    user_id=auth.user.id,
-                    api_key_id=auth.api_key.id,
+                    user_id=user_id,
+                    api_key_id=api_key_id,
                     provider_id=provider_id,
                     model=payload.model,
                     path=str(request.url.path),
@@ -171,7 +178,7 @@ async def _handle_stream(
     started_at = time.perf_counter()
 
     try:
-        provider, pricing, estimated_max_charge, sse_gen = await proxy_chat_completion_stream(
+        provider, pricing, estimated_max_charge, frozen_amount, sse_gen = await proxy_chat_completion_stream(
             session, payload, auth.user
         )
     except (UpstreamProviderError, GatewayError, HTTPException):
@@ -182,10 +189,12 @@ async def _handle_stream(
 
     mark_api_key_used(auth.api_key)
 
-    # Capture references for billing closure
+    # Cache scalar IDs before any session rollback (ORM objects expire after rollback)
     user = auth.user
     api_key = auth.api_key
     provider_id = provider.id
+    user_id = user.id
+    api_key_id = api_key.id
 
     async def _generate():
         accumulated_usage: dict = {"prompt_tokens": 0, "completion_tokens": 0}
@@ -227,7 +236,7 @@ async def _handle_stream(
 
                 usage_log = create_usage_log(
                     request_id=request_id,
-                    user_id=user.id,
+                    user_id=user_id,
                     provider_id=provider_id,
                     model=payload.model,
                     usage=accumulated_usage,
@@ -238,8 +247,8 @@ async def _handle_stream(
                 session.add(
                     create_request_log(
                         request_id=request_id,
-                        user_id=user.id,
-                        api_key_id=api_key.id,
+                        user_id=user_id,
+                        api_key_id=api_key_id,
                         provider_id=provider_id,
                         model=payload.model,
                         path=request.url.path,
@@ -256,10 +265,32 @@ async def _handle_stream(
                     api_key=api_key,
                     usage_log=usage_log,
                     billed_amount=billed_amount,
+                    frozen_amount=frozen_amount,
                 )
                 await session.commit()
             except Exception:
                 logger.exception("Billing error after stream request_id=%s", request_id)
+                # Rollback failed billing, then persist at least the request log
+                try:
+                    await session.rollback()
+                    session.add(
+                        create_request_log(
+                            request_id=request_id,
+                            user_id=user_id,
+                            api_key_id=api_key_id,
+                            provider_id=provider_id,
+                            model=payload.model,
+                            path=request.url.path,
+                            method=request.method,
+                            client_ip=client_ip,
+                            status_code=final_status,
+                            latency_ms=latency_ms,
+                            error_message="Billing failed after successful stream",
+                        )
+                    )
+                    await session.commit()
+                except Exception:
+                    logger.exception("Failed to save request log after billing error request_id=%s", request_id)
 
     return StreamingResponse(
         _generate(),

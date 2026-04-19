@@ -24,6 +24,7 @@ from app.models.model_pricing import ModelPricing
 from app.models.provider import Provider
 from app.models.user import User
 from app.schemas.chat import ChatCompletionRequest
+from app.services.billing_service import freeze_balance, settle_balance
 from app.services.langchain_service import langchain_invoke, langchain_stream
 from app.services.pricing_service import (
     compute_usage_cost,
@@ -44,6 +45,7 @@ class ProxyResult:
     provider: Provider
     pricing: ModelPricing | None
     estimated_max_charge: Decimal
+    frozen_amount: Decimal
     response_payload: dict[str, Any]
     status_code: int
 
@@ -59,6 +61,7 @@ class RoutingState(TypedDict):
     candidate_index: int
     pricing: ModelPricing | None
     estimated_max_charge: Decimal
+    frozen_amount: Decimal
 
     # Output
     result: ProxyResult | None
@@ -113,25 +116,37 @@ async def _node_check_pricing(state: RoutingState) -> dict:
     return {"pricing": pricing, "estimated_max_charge": estimated_max_charge}
 
 
-def _node_check_balance(state: RoutingState) -> dict:
+async def _node_check_balance(state: RoutingState) -> dict:
     idx = state["candidate_index"]
     provider = state["candidates"][idx]
     user = state["user"]
     estimated = state.get("estimated_max_charge", Decimal("0.00"))
 
-    if estimated > Decimal("0.00") and user.balance < estimated:
+    if estimated <= Decimal("0.00"):
+        return {"frozen_amount": Decimal("0.00")}
+
+    try:
+        frozen = await freeze_balance(
+            state["session"],
+            user=user,
+            amount=estimated,
+            model=state["payload"].model,
+        )
+        return {"frozen_amount": frozen}
+    except Exception:
         err = InsufficientBalanceError(
             402,
             f"Insufficient balance for '{provider.name}'. Need ~{estimated:.2f}, have {user.balance:.2f} CNY.",
         )
-        return {"last_balance_error": err, "candidate_index": idx + 1}
-    return {}
+        return {"last_balance_error": err, "candidate_index": idx + 1, "frozen_amount": Decimal("0.00")}
 
 
 async def _node_invoke_provider(state: RoutingState) -> dict:
     idx = state["candidate_index"]
     provider = state["candidates"][idx]
     payload = state["payload"]
+
+    frozen = state.get("frozen_amount", Decimal("0.00"))
 
     if provider.provider_type == "mock":
         from app.services.provider_adapter_service import build_mock_response
@@ -141,6 +156,7 @@ async def _node_invoke_provider(state: RoutingState) -> dict:
             provider=provider,
             pricing=state.get("pricing"),
             estimated_max_charge=state.get("estimated_max_charge", Decimal("0.00")),
+            frozen_amount=frozen,
             response_payload=response_payload,
             status_code=200,
         )
@@ -153,6 +169,7 @@ async def _node_invoke_provider(state: RoutingState) -> dict:
             provider=provider,
             pricing=state.get("pricing"),
             estimated_max_charge=state.get("estimated_max_charge", Decimal("0.00")),
+            frozen_amount=frozen,
             response_payload=response_payload,
             status_code=status_code,
         )
@@ -162,7 +179,13 @@ async def _node_invoke_provider(state: RoutingState) -> dict:
         await mark_provider_failure(state["session"], provider, exc.detail)
         should_fallback = exc.status_code in _FALLBACK_STATUS_CODES or exc.status_code >= 500
         if should_fallback:
-            return {"last_error": exc, "candidate_index": idx + 1}
+            # Unfreeze the balance locked for this provider before trying the next one
+            if frozen > Decimal("0.00"):
+                await settle_balance(
+                    state["session"], user=state["user"],
+                    frozen_amount=frozen, actual_amount=Decimal("0.00"),
+                )
+            return {"last_error": exc, "candidate_index": idx + 1, "frozen_amount": Decimal("0.00")}
         return {"last_error": exc, "terminal_error": exc.detail}
 
 
@@ -236,6 +259,7 @@ async def route_completion(
         "candidate_index": 0,
         "pricing": None,
         "estimated_max_charge": Decimal("0.00"),
+        "frozen_amount": Decimal("0.00"),
         "result": None,
         "last_error": None,
         "last_pricing_error": None,
@@ -260,15 +284,13 @@ async def route_stream(
     session: AsyncSession,
     payload: ChatCompletionRequest,
     user: User,
-) -> tuple[Provider, ModelPricing | None, Decimal, AsyncGenerator[str, None]]:
+) -> tuple[Provider, ModelPricing | None, Decimal, Decimal, AsyncGenerator[str, None]]:
     """
     Select a provider via the routing graph, then return a streaming generator.
 
-    Returns (provider, pricing, estimated_max_charge, sse_generator).
+    Returns (provider, pricing, estimated_max_charge, frozen_amount, sse_generator).
     The caller is responsible for billing after the stream ends.
     """
-    # Re-use the routing graph but stop at provider selection (before invoke).
-    # We build a lighter selection-only graph here.
     candidates = await get_provider_candidates(session, payload.model)
     if not candidates:
         raise UpstreamProviderError(503, f"No active provider available for model '{payload.model}'.")
@@ -302,7 +324,7 @@ async def route_stream(
                 yield f"data: [USAGE] {_json.dumps(usage)}\n\n"
                 yield "data: [DONE]\n\n"
 
-            return provider, None, Decimal("0.00"), _mock_stream()
+            return provider, None, Decimal("0.00"), Decimal("0.00"), _mock_stream()
 
         pricing = await get_model_pricing(session, provider_id=provider.id, model_name=payload.model)
         if pricing is None:
@@ -312,7 +334,11 @@ async def route_stream(
             continue
 
         estimated = estimate_max_billable_amount(payload, pricing)
-        if user.balance < estimated:
+
+        # Freeze balance atomically before calling upstream
+        try:
+            frozen = await freeze_balance(session, user=user, amount=estimated, model=payload.model)
+        except Exception:
             last_balance_error = InsufficientBalanceError(
                 402,
                 f"Insufficient balance for '{provider.name}'. Need ~{estimated:.2f}, have {user.balance:.2f} CNY.",
@@ -321,10 +347,11 @@ async def route_stream(
 
         try:
             gen = langchain_stream(provider, payload)
-            # Note: mark_provider_success is NOT called here because the generator
-            # hasn't started yet. The caller should mark success after streaming completes.
-            return provider, pricing, estimated, gen
+            return provider, pricing, estimated, frozen, gen
         except UpstreamProviderError as exc:
+            # Unfreeze the balance locked for this provider before trying the next one
+            if frozen > Decimal("0.00"):
+                await settle_balance(session, user=user, frozen_amount=frozen, actual_amount=Decimal("0.00"))
             await mark_provider_failure(session, provider, exc.detail)
             last_error = exc
             if exc.status_code not in _FALLBACK_STATUS_CODES and exc.status_code < 500:

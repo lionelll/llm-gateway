@@ -1,6 +1,9 @@
+import logging
 from decimal import Decimal
 
 from fastapi import HTTPException, status
+
+logger = logging.getLogger(__name__)
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -22,8 +25,8 @@ def resolve_topup_amounts(
     granted = quantize_money(granted_balance or ZERO_MONEY)
     margin = quantize_money(margin_amount or ZERO_MONEY)
 
-    # Count how many values were explicitly provided (non-zero)
-    provided = sum(1 for v in (payment, granted, margin) if v > ZERO_MONEY)
+    # Count how many values were explicitly provided (including 0.00)
+    provided = sum(1 for v in (payment_amount, granted_balance, margin_amount) if v is not None)
 
     if provided == 3:
         # All three provided — verify consistency instead of silently overwriting
@@ -33,11 +36,11 @@ def resolve_topup_amounts(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=f"Inconsistent amounts: payment({payment}) - granted({granted}) = {expected_margin}, but margin={margin}.",
             )
-    elif granted == ZERO_MONEY and payment > ZERO_MONEY:
+    elif granted_balance is None and payment > ZERO_MONEY:
         granted = quantize_money(payment - margin)
-    elif payment == ZERO_MONEY and granted > ZERO_MONEY:
+    elif payment_amount is None and granted > ZERO_MONEY:
         payment = quantize_money(granted + margin)
-    elif payment > ZERO_MONEY and granted > ZERO_MONEY and margin == ZERO_MONEY:
+    elif payment > ZERO_MONEY and granted > ZERO_MONEY and margin_amount is None:
         margin = quantize_money(payment - granted)
 
     if granted <= ZERO_MONEY:
@@ -64,6 +67,68 @@ def ensure_sufficient_balance(user: User, required_amount: Decimal, *, model: st
                 f"Required approximately {required_amount:.2f} CNY, available {user.balance:.2f} CNY."
             ),
         )
+
+
+async def freeze_balance(
+    session: AsyncSession,
+    *,
+    user: User,
+    amount: Decimal,
+    model: str,
+) -> Decimal:
+    """
+    Atomically freeze (pre-deduct) estimated cost from user balance.
+    Returns the actual frozen amount. Raises 402 if balance is insufficient.
+    """
+    amount = amount.quantize(MONEY_QUANTUM)
+    if amount <= ZERO_MONEY:
+        return ZERO_MONEY
+
+    locked_user = (
+        await session.execute(
+            select(User).where(User.id == user.id).with_for_update()
+        )
+    ).scalar_one()
+
+    if locked_user.balance < amount:
+        raise HTTPException(
+            status_code=status.HTTP_402_PAYMENT_REQUIRED,
+            detail=(
+                f"Insufficient balance for model '{model}'. "
+                f"Need ~{amount:.2f}, have {locked_user.balance:.2f} CNY."
+            ),
+        )
+
+    locked_user.balance = quantize_money(locked_user.balance - amount)
+    user.balance = locked_user.balance
+    await session.flush()
+    return amount
+
+
+async def settle_balance(
+    session: AsyncSession,
+    *,
+    user: User,
+    frozen_amount: Decimal,
+    actual_amount: Decimal,
+) -> None:
+    """
+    Settle after upstream call: refund (frozen - actual) back to user.
+    If actual > frozen (shouldn't happen normally), no extra deduction — platform eats the diff.
+    """
+    actual_amount = actual_amount.quantize(MONEY_QUANTUM)
+    refund = frozen_amount - actual_amount
+    if refund <= ZERO_MONEY:
+        return
+
+    locked_user = (
+        await session.execute(
+            select(User).where(User.id == user.id).with_for_update()
+        )
+    ).scalar_one()
+
+    locked_user.balance = quantize_money(locked_user.balance + refund)
+    user.balance = locked_user.balance
 
 
 def build_topup_transaction(
@@ -110,9 +175,15 @@ def apply_topup(
 
 
 async def reactivate_user_api_keys(session: AsyncSession, *, user_id: str) -> None:
-    api_keys = list((await session.scalars(select(APIKey).where(APIKey.user_id == user_id))).all())
+    api_keys = list((await session.scalars(
+        select(APIKey).where(
+            APIKey.user_id == user_id,
+            APIKey.disabled_reason == "zero_balance",
+        )
+    )).all())
     for item in api_keys:
         item.is_active = True
+        item.disabled_reason = None
 
 
 def build_usage_transaction(
@@ -141,26 +212,57 @@ async def apply_usage_charge(
     api_key: APIKey,
     usage_log: UsageLog,
     billed_amount: Decimal,
+    frozen_amount: Decimal = ZERO_MONEY,
 ) -> BalanceTransaction | None:
+    """
+    Record the actual usage charge. If balance was pre-frozen, settle the difference.
+    If not pre-frozen (legacy path), deduct directly with row lock.
+    """
     settings = get_settings()
+    actual = billed_amount.quantize(MONEY_QUANTUM)
 
-    # Row-level lock to prevent concurrent balance races
-    locked_user = (
-        await session.execute(
-            select(User).where(User.id == user.id).with_for_update()
-        )
-    ).scalar_one()
+    if frozen_amount > ZERO_MONEY:
+        if actual <= frozen_amount:
+            # Actual cost within estimate — refund excess frozen amount
+            await settle_balance(session, user=user, frozen_amount=frozen_amount, actual_amount=actual)
+            charged_amount = actual
+        else:
+            # Actual cost exceeds estimate — try to deduct the shortfall
+            shortfall = actual - frozen_amount
+            locked_user = (
+                await session.execute(
+                    select(User).where(User.id == user.id).with_for_update()
+                )
+            ).scalar_one()
+            extra = min(locked_user.balance, shortfall).quantize(MONEY_QUANTUM)
+            if extra > ZERO_MONEY:
+                locked_user.balance = quantize_money(locked_user.balance - extra)
+                user.balance = locked_user.balance
+            charged_amount = frozen_amount + extra
+            unrecovered = (shortfall - extra).quantize(MONEY_QUANTUM)
+            if unrecovered > ZERO_MONEY:
+                logger.warning(
+                    "Usage cost exceeded frozen + remaining balance for user %s: "
+                    "actual=%s frozen=%s extra=%s unrecovered=%s",
+                    user.id, actual, frozen_amount, extra, unrecovered,
+                )
+    else:
+        # Legacy path: no pre-freeze, lock and deduct now
+        locked_user = (
+            await session.execute(
+                select(User).where(User.id == user.id).with_for_update()
+            )
+        ).scalar_one()
+        charged_amount = min(locked_user.balance, actual)
+        charged_amount = charged_amount.quantize(MONEY_QUANTUM)
+        if charged_amount > ZERO_MONEY:
+            locked_user.balance = quantize_money(locked_user.balance - charged_amount)
+            user.balance = locked_user.balance
 
-    charged_amount = min(locked_user.balance, billed_amount)
-    charged_amount = charged_amount.quantize(MONEY_QUANTUM)
     usage_log.billed_amount = charged_amount
 
     if charged_amount <= ZERO_MONEY:
         return None
-
-    locked_user.balance = quantize_money(locked_user.balance - charged_amount)
-    # Sync the in-memory user object so callers see the updated balance
-    user.balance = locked_user.balance
 
     transaction = build_usage_transaction(
         user=user,
@@ -169,8 +271,14 @@ async def apply_usage_charge(
         charged_amount=charged_amount,
     )
     session.add(transaction)
-    if settings.auto_disable_api_keys_on_zero_balance and locked_user.balance <= ZERO_MONEY:
-        api_keys = list((await session.scalars(select(APIKey).where(APIKey.user_id == user.id))).all())
+
+    # Check if we need to disable keys
+    current_balance = user.balance
+    if settings.auto_disable_api_keys_on_zero_balance and current_balance <= ZERO_MONEY:
+        api_keys = list((await session.scalars(
+            select(APIKey).where(APIKey.user_id == user.id, APIKey.disabled_reason.is_(None))
+        )).all())
         for item in api_keys:
             item.is_active = False
+            item.disabled_reason = "zero_balance"
     return transaction

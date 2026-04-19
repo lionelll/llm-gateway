@@ -18,6 +18,7 @@ class TokenResponse(BaseModel):
     user_id: str
     name: str
     balance: str  # string to preserve decimal precision
+    api_key: str | None = None  # gateway API key, only returned on registration
 
 
 class UserMeResponse(BaseModel):

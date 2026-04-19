@@ -33,6 +33,7 @@ async def register(
         user_id=user.id,
         name=user.name,
         balance=f"{user.balance:.2f}",
+        api_key=plain_key,
     )
 
 

@@ -32,11 +32,11 @@ async def proxy_chat_completion_stream(
     session: AsyncSession,
     payload: ChatCompletionRequest,
     user: User,
-) -> tuple[Provider, ModelPricing | None, Decimal, AsyncGenerator[str, None]]:
+) -> tuple[Provider, ModelPricing | None, Decimal, Decimal, AsyncGenerator[str, None]]:
     """
     Select a provider and return a streaming SSE generator.
 
-    Returns (provider, pricing, estimated_max_charge, sse_generator).
+    Returns (provider, pricing, estimated_max_charge, frozen_amount, sse_generator).
     The router yields SSE lines; the last meaningful line before [DONE] is:
         data: [USAGE] {"prompt_tokens": N, "completion_tokens": M}
     The caller strips this sentinel and uses it for billing.

@@ -14,6 +14,7 @@ class APIKey(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     key_prefix: Mapped[str] = mapped_column(String(24), nullable=False)
     description: Mapped[str | None] = mapped_column(String(255))
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    disabled_reason: Mapped[str | None] = mapped_column(String(64), nullable=True)
     last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     user = relationship("User", back_populates="api_keys")

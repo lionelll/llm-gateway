@@ -15,6 +15,7 @@ class Settings(BaseSettings):
     redis_url: str = "redis://localhost:6379/0"
 
     gateway_api_key_hash_secret: str = "change-me-in-production"
+    provider_key_encryption_secret: str = "change-me-encryption-secret"
     api_key_rate_limit_per_minute: int = 60
     ip_rate_limit_per_minute: int = 120
     auto_disable_api_keys_on_zero_balance: bool = True

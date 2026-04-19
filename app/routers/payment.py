@@ -121,8 +121,14 @@ async def stripe_webhook(
 async def _handle_checkout_completed(session: AsyncSession, checkout_session: dict) -> None:
     metadata = checkout_session.get("metadata") or {}
     user_id: str = metadata.get("user_id", "")
-    payment_amount_str: str = metadata.get("payment_amount_cny", "0")
     checkout_id: str = checkout_session.get("id", "")
+
+    # Use the actual paid amount from Stripe (amount_total is in fen/cents)
+    amount_total = checkout_session.get("amount_total")
+    if amount_total is None or amount_total <= 0:
+        logger.warning("Stripe webhook: missing or zero amount_total in checkout %s", checkout_id)
+        return
+    payment_amount = Decimal(amount_total) / Decimal(100)
 
     if not user_id:
         logger.warning("Stripe webhook missing user_id in metadata")
@@ -144,7 +150,6 @@ async def _handle_checkout_completed(session: AsyncSession, checkout_session: di
         logger.error("Stripe webhook: user %s not found", user_id)
         return
 
-    payment_amount = Decimal(payment_amount_str)
     margin_amount = (payment_amount * _MARGIN_RATE).quantize(Decimal("0.01"))
     granted_balance = payment_amount - margin_amount
 

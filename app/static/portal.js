@@ -387,6 +387,7 @@ async function handleTopup(event) {
         user_id: elements.topupUserId.value,
         payment_amount: Number(elements.topupPayment.value).toFixed(2),
         margin_amount: Number(elements.topupMargin.value).toFixed(2),
+        idempotency_key: crypto.randomUUID(),
       }),
     });
     const payload = await response.json();
