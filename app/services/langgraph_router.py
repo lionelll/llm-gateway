@@ -132,6 +132,8 @@ async def _node_check_balance(state: RoutingState) -> dict:
             amount=estimated,
             model=state["payload"].model,
         )
+        # Commit freeze as a durable transaction before calling upstream
+        await state["session"].commit()
         return {"frozen_amount": frozen}
     except Exception:
         err = InsufficientBalanceError(
@@ -338,6 +340,7 @@ async def route_stream(
         # Freeze balance atomically before calling upstream
         try:
             frozen = await freeze_balance(session, user=user, amount=estimated, model=payload.model)
+            await session.commit()  # persist freeze as durable transaction
         except Exception:
             last_balance_error = InsufficientBalanceError(
                 402,
