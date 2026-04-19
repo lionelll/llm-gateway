@@ -246,6 +246,16 @@ async def apply_usage_charge(
                     "actual=%s frozen=%s extra=%s unrecovered=%s",
                     user.id, actual, frozen_amount, extra, unrecovered,
                 )
+                # Record platform loss for auditing
+                session.add(BalanceTransaction(
+                    user_id=user.id,
+                    api_key_id=api_key.id,
+                    usage_log_id=usage_log.id,
+                    transaction_type="platform_loss",
+                    amount=unrecovered,
+                    balance_after=user.balance,
+                    note=f"Unrecovered cost for {usage_log.model}: actual={actual} charged={charged_amount}",
+                ))
     else:
         # Legacy path: no pre-freeze, lock and deduct now
         locked_user = (

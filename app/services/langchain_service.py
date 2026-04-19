@@ -40,7 +40,7 @@ def _build_model(provider: Provider, model_name: str) -> Any:
     if ptype == "openai":
         from langchain_openai import ChatOpenAI
 
-        kwargs: dict[str, Any] = {"model": model_name, "temperature": 0}
+        kwargs: dict[str, Any] = {"model": model_name, "temperature": 0, "stream_usage": True}
         if provider.api_key:
             kwargs["api_key"] = provider.api_key
         if provider.base_url:
@@ -142,6 +142,7 @@ async def langchain_stream(
         created = int(time.time())
         prompt_tokens = 0
         completion_tokens = 0
+        total_content_chars = 0
 
         async for chunk in model.astream(messages):  # type: ignore[union-attr]
             content = chunk.content if isinstance(chunk.content, str) else ""
@@ -154,6 +155,7 @@ async def langchain_stream(
                 completion_tokens = usage_meta["output_tokens"]
 
             if content:
+                total_content_chars += len(content)
                 data = {
                     "id": chunk_id,
                     "object": "chat.completion.chunk",
@@ -168,6 +170,12 @@ async def langchain_stream(
                     ],
                 }
                 yield f"data: {json.dumps(data, ensure_ascii=False)}\n\n"
+
+        # Fallback: if upstream didn't report usage but we got content, estimate locally
+        if completion_tokens == 0 and total_content_chars > 0:
+            completion_tokens = max(1, total_content_chars // 3)
+        if prompt_tokens == 0:
+            prompt_tokens = max(1, (len(json.dumps(payload.model_dump(exclude_none=True), ensure_ascii=False)) // 3) + 32)
 
         # Final chunk with finish_reason
         final = {

@@ -419,6 +419,22 @@ function bindEvents() {
       showToast(error.message, "error");
     });
   });
+  // Demo fill buttons — only shown in development environment
+  fetch("/api/env")
+    .then((r) => r.json())
+    .then((data) => {
+      if (data.app_env === "development") {
+        elements.fillDemoUser.style.display = "";
+        elements.fillDemoAdmin.style.display = "";
+      } else {
+        elements.fillDemoUser.style.display = "none";
+        elements.fillDemoAdmin.style.display = "none";
+      }
+    })
+    .catch(() => {
+      elements.fillDemoUser.style.display = "none";
+      elements.fillDemoAdmin.style.display = "none";
+    });
   elements.fillDemoUser.addEventListener("click", () => {
     elements.loginUserName.value = "demo-user";
     elements.loginApiKey.value = "gw_demo_local_key";

@@ -9,8 +9,11 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from sqlalchemy import select
+
 from app.core.exceptions import GatewayError, UpstreamProviderError
 from app.db import get_async_session
+from app.models.provider import Provider
 from app.deps import AuthContext, require_api_key
 from app.redis_client import get_redis_client
 from app.schemas.chat import ChatCompletionRequest
@@ -143,6 +146,16 @@ async def _handle_non_stream(
         if status_code >= 400:
             # Rollback any dirty state from a partially-failed billing attempt
             await session.rollback()
+            # Re-persist provider failure health (was rolled back with the session)
+            if provider_id and error_message:
+                try:
+                    provider_obj = (await session.execute(
+                        select(Provider).where(Provider.id == provider_id)
+                    )).scalar_one_or_none()
+                    if provider_obj:
+                        await mark_provider_failure(session, provider_obj, error_message)
+                except Exception:
+                    logger.debug("Could not re-persist provider failure for %s", provider_id)
             session.add(
                 create_request_log(
                     request_id=request_id,

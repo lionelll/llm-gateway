@@ -4,6 +4,7 @@ from redis.asyncio import Redis
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config import get_settings
 from app.db import get_async_session
 from app.redis_client import get_redis_client
 from app.schemas.health import HealthResponse
@@ -33,3 +34,10 @@ async def health_check(
     status_code = 200 if overall_status == "ok" else 503
     payload = HealthResponse(status=overall_status, database=database_status, redis=redis_status)
     return JSONResponse(status_code=status_code, content=payload.model_dump())
+
+
+@router.get("/api/env")
+async def get_env() -> dict:
+    """Return non-sensitive environment info for frontend feature flags."""
+    settings = get_settings()
+    return {"app_env": settings.app_env}

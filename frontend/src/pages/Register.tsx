@@ -7,6 +7,8 @@ export default function Register() {
   const [form, setForm] = useState({ name: "", email: "", password: "" })
   const [error, setError] = useState("")
   const [loading, setLoading] = useState(false)
+  const [gatewayKey, setGatewayKey] = useState("")
+  const [copied, setCopied] = useState(false)
   const { login } = useAuth()
   const navigate = useNavigate()
 
@@ -22,12 +24,50 @@ export default function Register() {
         balance: data.balance,
         is_admin: false,
       })
-      navigate("/dashboard")
+      if (data.api_key) {
+        setGatewayKey(data.api_key)
+      } else {
+        navigate("/dashboard")
+      }
     } catch (err: any) {
       setError(err.response?.data?.detail || "注册失败")
     } finally {
       setLoading(false)
     }
+  }
+
+  const handleCopyKey = async () => {
+    await navigator.clipboard.writeText(gatewayKey)
+    setCopied(true)
+    setTimeout(() => setCopied(false), 2000)
+  }
+
+  if (gatewayKey) {
+    return (
+      <div className="min-h-screen bg-gray-50 flex items-center justify-center">
+        <div className="bg-white p-8 rounded-2xl shadow-sm border border-gray-100 w-full max-w-md">
+          <h1 className="text-2xl font-bold text-gray-900 mb-2">注册成功</h1>
+          <p className="text-gray-500 text-sm mb-4">
+            请立即复制你的 Gateway API Key，此密钥仅显示一次。
+          </p>
+          <div className="bg-gray-50 border border-gray-200 rounded-lg p-3 mb-4 font-mono text-sm break-all select-all">
+            {gatewayKey}
+          </div>
+          <button
+            onClick={handleCopyKey}
+            className="w-full bg-blue-600 text-white py-2 rounded-lg text-sm font-medium hover:bg-blue-700 transition-colors mb-3"
+          >
+            {copied ? "已复制" : "复制 Key"}
+          </button>
+          <button
+            onClick={() => navigate("/dashboard")}
+            className="w-full bg-gray-100 text-gray-700 py-2 rounded-lg text-sm font-medium hover:bg-gray-200 transition-colors"
+          >
+            进入控制台
+          </button>
+        </div>
+      </div>
+    )
   }
 
   return (
