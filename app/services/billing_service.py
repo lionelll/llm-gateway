@@ -222,28 +222,42 @@ async def apply_usage_charge(
     actual = billed_amount.quantize(MONEY_QUANTUM)
 
     if frozen_amount > ZERO_MONEY:
-        # Cap charged amount at frozen — with enforced max_tokens, actual should
-        # never exceed frozen. If it does, log it for investigation but never
-        # supplement from remaining balance (that would be a new deduction without
-        # a prior freeze, violating the pre-authorization model).
+        # Settle the frozen portion first (refund frozen - min(actual, frozen) back to user)
         charged_amount = min(actual, frozen_amount)
         await settle_balance(session, user=user, frozen_amount=frozen_amount, actual_amount=charged_amount)
+
         if actual > frozen_amount:
-            platform_loss = (actual - frozen_amount).quantize(MONEY_QUANTUM)
-            logger.warning(
-                "Actual cost exceeded frozen ceiling for user %s: "
-                "actual=%s frozen=%s platform_loss=%s (max_tokens enforcement may have failed)",
-                user.id, actual, frozen_amount, platform_loss,
-            )
-            session.add(BalanceTransaction(
-                user_id=user.id,
-                api_key_id=api_key.id,
-                usage_log_id=usage_log.id,
-                transaction_type="platform_loss",
-                amount=platform_loss,
-                balance_after=user.balance,
-                note=f"Unrecovered cost for {usage_log.model}: actual={actual} frozen={frozen_amount}",
-            ))
+            # Supplemental deduction: input token estimates can undercount,
+            # so actual cost may exceed the pre-freeze. Deduct the shortfall
+            # from the user's remaining balance (like credit-card settlement
+            # exceeding pre-auth).
+            shortfall = (actual - frozen_amount).quantize(MONEY_QUANTUM)
+            locked_user = (
+                await session.execute(
+                    select(User).where(User.id == user.id).with_for_update()
+                )
+            ).scalar_one()
+            supplement = min(shortfall, locked_user.balance).quantize(MONEY_QUANTUM)
+            if supplement > ZERO_MONEY:
+                locked_user.balance = quantize_money(locked_user.balance - supplement)
+                user.balance = locked_user.balance
+                charged_amount += supplement
+            remaining_loss = (shortfall - supplement).quantize(MONEY_QUANTUM)
+            if remaining_loss > ZERO_MONEY:
+                logger.warning(
+                    "Actual cost exceeded frozen ceiling for user %s: "
+                    "actual=%s frozen=%s supplement=%s platform_loss=%s",
+                    user.id, actual, frozen_amount, supplement, remaining_loss,
+                )
+                session.add(BalanceTransaction(
+                    user_id=user.id,
+                    api_key_id=api_key.id,
+                    usage_log_id=usage_log.id,
+                    transaction_type="platform_loss",
+                    amount=remaining_loss,
+                    balance_after=user.balance,
+                    note=f"Unrecovered cost for {usage_log.model}: actual={actual} frozen={frozen_amount}",
+                ))
     else:
         # Legacy path: no pre-freeze, lock and deduct now
         locked_user = (

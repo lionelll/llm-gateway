@@ -10,6 +10,7 @@ from decimal import Decimal
 import stripe
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
@@ -163,7 +164,12 @@ async def _handle_checkout_completed(session: AsyncSession, checkout_session: di
         )
     )
     await reactivate_user_api_keys(session, user_id=user.id)
-    await session.commit()
+    try:
+        await session.commit()
+    except IntegrityError:
+        await session.rollback()
+        logger.info("Stripe webhook: checkout %s concurrent duplicate, skipping", checkout_id)
+        return
     logger.info("Topped up user %s with %.2f CNY (payment: %.2f)", user_id, granted_balance, payment_amount)
 
 

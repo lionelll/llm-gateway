@@ -113,7 +113,7 @@ async def _node_check_pricing(state: RoutingState) -> dict:
     if pricing is not None:
         estimated_max_charge = estimate_max_billable_amount(state["payload"], pricing)
 
-    return {"pricing": pricing, "estimated_max_charge": estimated_max_charge}
+    return {"pricing": pricing, "estimated_max_charge": estimated_max_charge, "last_pricing_error": None}
 
 
 async def _node_check_balance(state: RoutingState) -> dict:
@@ -134,7 +134,7 @@ async def _node_check_balance(state: RoutingState) -> dict:
         )
         # Commit freeze as a durable transaction before calling upstream
         await state["session"].commit()
-        return {"frozen_amount": frozen}
+        return {"frozen_amount": frozen, "last_balance_error": None}
     except Exception:
         err = InsufficientBalanceError(
             402,
@@ -162,7 +162,7 @@ async def _node_invoke_provider(state: RoutingState) -> dict:
             response_payload=response_payload,
             status_code=200,
         )
-        return {"result": result}
+        return {"result": result, "last_error": None}
 
     try:
         response_payload, status_code = await langchain_invoke(provider, payload)
@@ -175,7 +175,7 @@ async def _node_invoke_provider(state: RoutingState) -> dict:
             response_payload=response_payload,
             status_code=status_code,
         )
-        return {"result": result}
+        return {"result": result, "last_error": None}
 
     except UpstreamProviderError as exc:
         await mark_provider_failure(state["session"], provider, exc.detail)
