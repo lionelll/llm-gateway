@@ -33,6 +33,11 @@ services:
       context: .
     env_file:
       - .env
+    environment:
+      # Override connection strings for container networking (host .env uses localhost)
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-llm_gateway}:${POSTGRES_PASSWORD:-llm_gateway}@postgres:5432/${POSTGRES_DB:-llm_gateway}
+      DATABASE_SYNC_URL: postgresql+psycopg://${POSTGRES_USER:-llm_gateway}:${POSTGRES_PASSWORD:-llm_gateway}@postgres:5432/${POSTGRES_DB:-llm_gateway}
+      REDIS_URL: redis://redis:6379/0
     command:
       - sh
       - -c

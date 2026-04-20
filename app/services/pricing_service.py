@@ -51,8 +51,10 @@ def estimate_max_billable_amount(payload: ChatCompletionRequest, pricing: ModelP
 
     max_tokens is enforced at the router entry point, so it is always set.
     The result is a hard ceiling (not an estimate) used for balance pre-freeze.
+    Input tokens use 2x padding because the char-based heuristic can undercount.
+    Output tokens use the exact max_tokens value (upstream is bound by it).
     """
-    estimated_input_tokens = estimate_prompt_tokens(payload)
+    estimated_input_tokens = estimate_prompt_tokens(payload) * 2  # 2x padding for tokenizer variance
     estimated_output_tokens = payload.max_tokens
     assert estimated_output_tokens is not None, "max_tokens must be enforced before estimate"
     raw_cost = (

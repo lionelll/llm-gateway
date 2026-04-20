@@ -187,7 +187,15 @@ async def _node_invoke_provider(state: RoutingState) -> dict:
                     state["session"], user=state["user"],
                     frozen_amount=frozen, actual_amount=Decimal("0.00"),
                 )
+                await state["session"].commit()  # persist refund durably
             return {"last_error": exc, "candidate_index": idx + 1, "frozen_amount": Decimal("0.00")}
+        # Terminal failure (non-retriable) — still need to refund the freeze
+        if frozen > Decimal("0.00"):
+            await settle_balance(
+                state["session"], user=state["user"],
+                frozen_amount=frozen, actual_amount=Decimal("0.00"),
+            )
+            await state["session"].commit()
         return {"last_error": exc, "terminal_error": exc.detail}
 
 
@@ -355,6 +363,7 @@ async def route_stream(
             # Unfreeze the balance locked for this provider before trying the next one
             if frozen > Decimal("0.00"):
                 await settle_balance(session, user=user, frozen_amount=frozen, actual_amount=Decimal("0.00"))
+                await session.commit()  # persist refund durably
             await mark_provider_failure(session, provider, exc.detail)
             last_error = exc
             if exc.status_code not in _FALLBACK_STATUS_CODES and exc.status_code < 500:
