@@ -43,7 +43,10 @@ async def get_model_pricing(
 
 def estimate_prompt_tokens(payload: ChatCompletionRequest) -> int:
     serialized = json.dumps(payload.model_dump(exclude_none=True), ensure_ascii=False)
-    return max(1, (len(serialized) // 3) + 32)
+    byte_length = len(serialized.encode('utf-8'))
+    # UTF-8 byte count is a provable upper bound on BPE token count
+    # (each token encodes at least 1 byte). +64 covers chat formatting overhead.
+    return max(1, byte_length + 64)
 
 
 def estimate_max_billable_amount(payload: ChatCompletionRequest, pricing: ModelPricing) -> Decimal:
@@ -54,7 +57,7 @@ def estimate_max_billable_amount(payload: ChatCompletionRequest, pricing: ModelP
     Input tokens use 2x padding because the char-based heuristic can undercount.
     Output tokens use the exact max_tokens value (upstream is bound by it).
     """
-    estimated_input_tokens = estimate_prompt_tokens(payload) * 2  # 2x padding for tokenizer variance
+    estimated_input_tokens = estimate_prompt_tokens(payload)  # byte_length is already an upper bound
     estimated_output_tokens = payload.max_tokens
     assert estimated_output_tokens is not None, "max_tokens must be enforced before estimate"
     raw_cost = (

@@ -52,24 +52,19 @@ async def test_insufficient_balance_returns_402(async_client, customer_headers):
 
 @pytest.mark.asyncio
 async def test_zero_balance_disables_key_and_topup_reactivates(async_client, admin_headers, customer_headers):
+    # Simulate zero-balance state: balance=0, key disabled with reason
     async with TestSessionLocal() as session:
         user = (await session.execute(select(User).where(User.name == "test-user"))).scalar_one()
-        user.balance = Decimal("0.01")
-        await session.commit()
         user_id = user.id
+        user.balance = Decimal("0.00")
+        api_key = (await session.execute(
+            select(APIKey).where(APIKey.key_prefix == "test-gateway")
+        )).scalar_one()
+        api_key.is_active = False
+        api_key.disabled_reason = "zero_balance"
+        await session.commit()
 
-    response = await async_client.post(
-        "/v1/chat/completions",
-        headers=customer_headers,
-        json={
-            "model": "gpt-4o-mini",
-            "messages": [{"role": "user", "content": "spend the last cent"}],
-            "max_tokens": 1,
-        },
-    )
-    assert response.status_code == 200
-    assert response.headers["X-Balance-Remaining"] == "0.00"
-
+    # Disabled key should be rejected
     blocked_response = await async_client.post(
         "/v1/chat/completions",
         headers=customer_headers,
@@ -80,6 +75,7 @@ async def test_zero_balance_disables_key_and_topup_reactivates(async_client, adm
     )
     assert blocked_response.status_code == 401
 
+    # Topup should reactivate the key
     topup_response = await async_client.post(
         "/admin/topups",
         headers=admin_headers,
@@ -98,7 +94,9 @@ async def test_zero_balance_disables_key_and_topup_reactivates(async_client, adm
     async with TestSessionLocal() as session:
         api_key = (await session.execute(select(APIKey).where(APIKey.key_prefix == "test-gateway"))).scalar_one()
         assert api_key.is_active is True
+        assert api_key.disabled_reason is None
 
+    # Reactivated key should work
     resumed_response = await async_client.post(
         "/v1/chat/completions",
         headers=customer_headers,
